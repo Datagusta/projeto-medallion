@@ -2,7 +2,7 @@
 
 Pipeline de engenharia de dados ponta a ponta sobre os dados abertos de preços de combustíveis da ANP, usando a arquitetura Medallion no Databricks Free Edition.
 
-> **Status do projeto:** Fases 0 a 3 concluídas (ambiente, landing, bronze e silver). Pendentes: ingestão incremental (Fase 4), gold com dbt (Fase 5), Job + Asset Bundle (Fase 6) e dashboard (Fase 7). Veja o [roadmap](#roadmap).
+> **Status do projeto:** Fases 0 a 4 concluídas (ambiente, landing, bronze, silver e ingestão incremental com 2025-S1 e 2025-S2). Pendentes: gold com dbt (Fase 5), Job + Asset Bundle (Fase 6) e dashboard (Fase 7). Veja o [roadmap](#roadmap).
 
 ## Arquitetura
 
@@ -31,7 +31,12 @@ Databricks Free Edition (serverless), Unity Catalog, Volumes, Auto Loader, Lakef
 
 - **Fonte:** ANP, "Série histórica do levantamento de preços de combustíveis" (arquivos semestrais "Combustíveis Automotivos"), via dados abertos do governo.
 - **Carga inicial:** 2023-S1, 2023-S2, 2024-S1, 2024-S2 (~300 MB, **1.802.536 linhas**).
-- **Reservados para a carga incremental:** 2025-S1 e 2025-S2 (`data/incremental/`, fora do Git e fora do Volume até a Fase 4).
+- **Cargas incrementais** (`data/incremental/`, enviadas ao Volume uma por vez e processadas com *Run pipeline* normal, sem full refresh):
+
+| Carga | Linhas na bronze | Observação |
+|---|---|---|
+| 2025-S1 | 429.523 | 9.114 linhas sem dados (ver decisão 9.1) |
+| 2025-S2 | 384.208 | Sem linhas vazias nem reprovações |
 - **Layout:** 16 colunas, separador `;`, decimal com vírgula, data `dd/MM/yyyy`, **UTF-8**. O layout de 2025 é idêntico ao de 2023/2024 (não há schema evolution).
 
 | Produto | Linhas (bronze) | Unidade |
@@ -147,7 +152,7 @@ Todos os casos ocorrem em 10 ou 12/06/2024 e envolvem só 4 CNPJs, o que sugere 
 |---|---|
 | Simples e suficiente: impacto de 14 em 1,8 milhão (≈0,0008%) | Em streaming, `dropDuplicates` mantém estado que cresce com o volume |
 | Chave natural do negócio (posto × produto × dia) | Nos 4 casos de preço divergente, a linha mantida é arbitrária (não determinística) |
-| | Roda **antes** das expectations, então elas não enxergam as duplicatas |
+| | Roda **depois** das expectations (ver 9.1); na versão inicial rodava antes e mascarava descartes |
 
 **Alternativas avaliadas e não adotadas:** incluir `nome_rua`/`numero_rua` na chave (poderia preservar filiais; falta confirmar com os dados) e `create_auto_cdc_flow` com ordenação por `_ingested_at` (determinístico, mais complexo; indicado em produção).
 
@@ -168,9 +173,32 @@ Todos os casos ocorrem em 10 ou 12/06/2024 e envolvem só 4 CNPJs, o que sugere 
 | Qualidade declarativa e auditável no event log | Zero reprovações na carga inicial: o relatório ainda não demonstra descartes |
 | Mistura registrar e descartar, conforme a gravidade | `expect_or_fail` não foi usado (decisão consciente: derrubar o pipeline por 1 linha ruim seria desproporcional) |
 | Limite de preço (`< 20`) serve para todos os produtos, inclusive GNV (R$ 2,39 a 6,89) | Limite fixo pode deixar passar preços absurdos mas menores que 20 |
-| | Expectations só veem dados pós-dedup |
+| | Uma linha vazia reprova em todas as expectations ao mesmo tempo; cada uma conta as mesmas linhas, não problemas distintos |
 
-Os dados chegaram limpos e isso é um resultado legítimo; nenhuma falha foi forçada artificialmente. A carga de 2025 será reavaliada.
+Na carga inicial os dados chegaram limpos, resultado legítimo, sem falhas forçadas artificialmente. O 2025-S1 trouxe o primeiro caso real (9.114 linhas vazias), descrito em 9.1.
+
+### 9.1 Expectations antes da dedup (silver em dois passos)
+
+**Problema encontrado:** o arquivo 2025-S1 traz 9.114 linhas sem dados. Na primeira versão da silver, o `dropDuplicates` rodava antes das expectations e colapsou as 9.114 em 1 (campos nulos contam como iguais). O relatório mostrou 1 reprovação, subestimando o problema em 9.113 linhas.
+
+**Correção:** separar a silver em dois passos.
+
+```
+bronze_combustiveis ──► silver_tipada (view: tipagem + 5 expectations)
+                    ──► silver_combustiveis (tabela: dropDuplicates)
+```
+
+O reprocessamento foi um **full refresh só da silver** (a bronze ficou como "Omitted"), preservando checkpoints e o histórico incremental da bronze.
+
+**Resultado:** o relatório passou a mostrar 9.114 reprovações em cada expectation (as mesmas linhas, não 45 mil problemas distintos), com 2.222.945 aprovadas sobre 2.232.059 avaliadas. A silver final não mudou (2.222.931 naquele momento), o que confirma que a refatoração só melhorou a observabilidade. No 2025-S2 (update incremental seguinte): 384.208 aprovadas e 0 reprovadas.
+
+| Prós | Contras |
+|---|---|
+| Relatório de qualidade fiel ao que entrou | Mais um objeto no grafo |
+| Dedup não mascara problemas de qualidade | Exigiu reprocessar a silver |
+| Separa validar e deduplicar | O relatório histórico anterior à refatoração subestima descartes e não deve ser usado |
+
+A causa das linhas vazias (provavelmente linhas só com separadores) **não foi verificada** no arquivo bruto.
 
 ### 10. Tratamento do GNV e dos diesels
 
@@ -199,6 +227,8 @@ A UI atual cria o pipeline direto (com `workspace.default` e nome automático) e
 
 ## Reconciliação de linhas
 
+**Carga inicial (2023-2024):**
+
 | Etapa | Linhas |
 |---|---|
 | Bronze | 1.802.536 |
@@ -206,7 +236,19 @@ A UI atual cria o pipeline direto (com `workspace.default` e nome automático) e
 | Descartadas por `expect_or_drop` | 0 |
 | **Silver** | **1.802.522** |
 
-Silver por produto: DIESEL 208.717; DIESEL S10 334.729; ETANOL 395.155; GASOLINA 465.099; GASOLINA ADITIVADA 361.390; GNV 37.432. Datas de 2023-01-02 a 2024-12-31.
+**Após as duas cargas incrementais (estado atual):**
+
+| Etapa | Linhas |
+|---|---|
+| Bronze (6 arquivos: 1.802.536 + 429.523 + 384.208) | 2.616.267 |
+| Reprovadas nas expectations (linhas vazias do 2025-S1) | −9.114 |
+| Aprovadas em `silver_tipada` | 2.607.153 |
+| Removidas por dedup | −14 |
+| **Silver** | **2.607.139** |
+
+A silver medida (2.607.139) coincide com o cálculo. O incremento do 2025-S2 foi de 384.208 linhas na bronze e na silver, sem descartes.
+
+Silver por produto (só a carga inicial 2023-2024): DIESEL 208.717; DIESEL S10 334.729; ETANOL 395.155; GASOLINA 465.099; GASOLINA ADITIVADA 361.390; GNV 37.432. Datas de 2023-01-02 a 2024-12-31.
 
 ## Como reproduzir (até a Fase 3)
 
@@ -243,7 +285,7 @@ Silver por produto: DIESEL 208.717; DIESEL S10 334.729; ETANOL 395.155; GASOLINA
 - [x] **Fase 1:** schemas, Volume e carga inicial (tamanhos conferidos)
 - [x] **Fase 2:** bronze com Auto Loader (contagens validadas)
 - [x] **Fase 3:** silver com expectations (grafo e relatório obtidos)
-- [ ] **Fase 4:** ingestão incremental (subir 2025-S1, rodar sem full refresh, provar com `_source_file` e `DESCRIBE HISTORY`; repetir com 2025-S2)
+- [x] **Fase 4:** ingestão incremental (2025-S1 e 2025-S2 sem full refresh na bronze; provada por `_source_file`, grafo e `DESCRIBE HISTORY`: versões 4 e 5 são `STREAMING UPDATE` em modo `Append`)
 - [ ] **Fase 5:** gold com dbt (`preco_medio_estado_mes`, `ranking_municipios`, `variacao_semanal`; testes e docs)
 - [ ] **Fase 6:** Job (pipeline → dbt) e Asset Bundle
 - [ ] **Fase 7:** dashboard AI/BI e documentação final
@@ -252,7 +294,7 @@ Silver por produto: DIESEL 208.717; DIESEL S10 334.729; ETANOL 395.155; GASOLINA
 
 - [x] Grafo do pipeline (bronze → silver, 5 expectations) em `docs/`
 - [x] Relatório de expectations (query + resultado)
-- [ ] Grafo com a carga incremental
+- [x] Grafo com a carga incremental (bronze com ~430K de saída, não o reprocessamento total); salvar o print em `docs/`
 - [ ] `databricks.yml` e `resources/`
 - [ ] Projeto dbt com testes e docs
 - [ ] Print do job com as duas tasks e do dashboard
@@ -276,6 +318,7 @@ FROM (
   WHERE event_type = 'flow_progress'
     AND details:flow_progress.data_quality.expectations IS NOT NULL
 )
+WHERE d.dataset = 'silver_tipada'   -- ignora o histórico anterior à refatoração
 GROUP BY d.name
 ORDER BY reprovados DESC;
 ```
