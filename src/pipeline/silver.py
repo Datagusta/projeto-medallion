@@ -2,19 +2,15 @@ from pyspark import pipelines as dp
 from pyspark.sql import functions as F
 
 
-@dp.table(
-    name="gas_medallion.silver.silver_combustiveis",
-    comment="Preços de combustíveis ANP tipados, limpos e validados por expectations.",
-)
+@dp.view(name="silver_tipada")
 @dp.expect("estado_preenchido", "estado_sigla IS NOT NULL")
 @dp.expect("unidade_preenchida", "unidade_medida IS NOT NULL")
 @dp.expect_or_drop("preco_valido", "valor_venda > 0 AND valor_venda < 20")
 @dp.expect_or_drop("data_valida", "data_coleta IS NOT NULL")
 @dp.expect_or_drop("cnpj_valido", "LENGTH(cnpj_revenda) = 14")
-def silver_combustiveis():
+def silver_tipada():
     b = spark.readStream.table("gas_medallion.bronze.bronze_combustiveis")
-    return (
-        b.select(
+    return b.select(
             F.upper(F.trim("regiao_sigla")).alias("regiao_sigla"),
             F.upper(F.trim("estado_sigla")).alias("estado_sigla"),
             F.upper(F.trim("municipio")).alias("municipio"),
@@ -33,5 +29,12 @@ def silver_combustiveis():
             "_source_file",
             "_ingested_at",
         )
+@dp.table(
+    name="gas_medallion.silver.silver_combustiveis",
+    comment="Preços ANP tipados, validados e deduplicados.",
+)
+def silver_combustiveis():
+    return (
+        spark.readStream.table("silver_tipada")
         .dropDuplicates(["cnpj_revenda", "produto", "data_coleta"])
     )
