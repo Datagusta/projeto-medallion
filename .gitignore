@@ -1,0 +1,16 @@
+﻿# Dados e ambientes
+data/
+.venv/
+__pycache__/
+
+# Databricks / dbt
+.databricks/
+.bundle/
+dbt_combustiveis/target/
+dbt_combustiveis/dbt_packages/
+dbt_combustiveis/logs/
+profiles.yml
+
+# Segredos
+.env
+*.token
