@@ -14,3 +14,7 @@ profiles.yml
 # Segredos
 .env
 *.token
+
+# dbt
+.user.yml
+logs/

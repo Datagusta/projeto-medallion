@@ -2,7 +2,7 @@
 
 Pipeline de engenharia de dados ponta a ponta sobre os dados abertos de preços de combustíveis da ANP, usando a arquitetura Medallion no Databricks Free Edition.
 
-> **Status do projeto:** Fases 0 a 4 concluídas (ambiente, landing, bronze, silver e ingestão incremental com 2025-S1 e 2025-S2). Pendentes: gold com dbt (Fase 5), Job + Asset Bundle (Fase 6) e dashboard (Fase 7). Veja o [roadmap](#roadmap).
+> **Status do projeto:** Fases 0 a 5 concluídas (ambiente, landing, bronze, silver, ingestão incremental com 2025-S1 e 2025-S2, e gold com dbt: 3 modelos e 25/25 itens do `dbt build` passando). Pendentes: Job + Asset Bundle (Fase 6) e dashboard (Fase 7). Veja o [roadmap](#roadmap).
 
 ## Arquitetura
 
@@ -10,7 +10,7 @@ Pipeline de engenharia de dados ponta a ponta sobre os dados abertos de preços 
 CSVs locais ──► Volume (gas_medallion.landing.raw/anp/)
             ──► Bronze  (Auto Loader, tudo string + metadados)     [Lakeflow Pipeline]
             ──► Silver  (tipagem, limpeza, dedup, expectations)    [Lakeflow Pipeline]
-            ──► Gold    (agregações e rankings)                    [dbt-databricks]   (pendente)
+            ──► Gold    (agregações e rankings)                    [dbt-databricks]
             ──► Dashboard (AI/BI)                                                      (pendente)
 
 Orquestração: Databricks Job (pipeline → dbt)  |  IaC: Databricks Asset Bundle          (pendente)
@@ -127,7 +127,7 @@ Opções do Auto Loader: `cloudFiles.inferColumnTypes=false` e `cloudFiles.schem
 | `data_coleta` | `to_date(..., 'dd/MM/yyyy')` | Tipagem |
 | `valor_venda` | `,` → `.` e `cast(decimal(10,3))` | Tipagem numérica exata, sem erro de ponto flutuante |
 | `cnpj_revenda` | `trim` e remoção de não-dígitos | Em 2023 vem como ` 00.003.188/0001-21` e em 2025 como `04431113000100`; sem isso o mesmo posto teria dois CNPJs |
-| `unidade_medida` | colapsar espaços | `R$ / litro` e `R$ /litro` coexistem |
+| `unidade_medida` | colapsar espaços e padronizar `m3` → `m³` | `R$ / litro` e `R$ /litro` coexistem; a ANP trocou `m³` por `m3` no GNV em 01/07/2025 (decisão 14) |
 | Textos (município, revenda, produto, bairro, bandeira, UF) | `trim` + `upper` | Padronização |
 
 `valor_de_compra` (100% vazio no layout observado) **não foi carregado** na silver.
@@ -165,6 +165,7 @@ Todos os casos ocorrem em 10 ou 12/06/2024 e envolvem só 4 CNPJs, o que sugere 
 | `preco_valido` | `valor_venda > 0 AND valor_venda < 20` | descarta |
 | `data_valida` | `data_coleta IS NOT NULL` | descarta |
 | `cnpj_valido` | `LENGTH(cnpj_revenda) = 14` | descarta |
+| `unidade_conhecida` | `unidade_medida IN ('R$ / litro', 'R$ / m³')` | registra (adicionada após o caso do GNV, decisão 14) |
 
 **Resultado na carga inicial:** 0 reprovações em todas (1.802.522 aprovados em cada).
 
@@ -224,6 +225,47 @@ A UI atual cria o pipeline direto (com `workspace.default` e nome automático) e
 | `.venv` dedicado para o dbt | Isola dependências do Anaconda `base`. Custo: dois ambientes ativos no prompt |
 | `.gitignore` antes do primeiro commit | Evita vazar dados, `profiles.yml` e tokens |
 | Comandos em PowerShell | `mkdir -p`, `touch` e heredocs de bash não funcionam |
+| Token do dbt em variável de ambiente (`DATABRICKS_TOKEN`), validade de 30 dias, escopo `all-apis` | Nada de segredo no repositório. Custo: redefinir a variável a cada terminal novo; `all-apis` é o escopo mais amplo (aceito pelo prazo curto e por ser projeto de estudo) |
+| `pip-system-certs` no `.venv` | O dbt falhou com `CERTIFICATE_VERIFY_FAILED` (certificado autoassinado na cadeia); o pacote resolveu. A causa provável é inspeção de HTTPS na rede, mas isso não foi confirmado |
+
+### 13. Gold com dbt
+
+Três modelos em `gas_medallion.gold`, todos `table`, lendo a silver declarada como `source`.
+
+| Modelo | Grão | Decisões |
+|---|---|---|
+| `preco_medio_estado_mes` | estado × produto × mês | `familia_produto` agrupa gasolina + aditivada e diesel + S10; GNV tem linhas próprias, sem mistura com litro |
+| `ranking_municipios` | estado × município × produto (período todo) | Estado na chave (nomes de município se repetem); mínimo de 30 coletas (`var min_coletas_ranking`), **valor arbitrário** a revisar; `rank_mais_caro` e `rank_mais_barato` |
+| `variacao_semanal` | produto × semana | Variação só se a semana anterior é exatamente 7 dias antes (evita `LAG` sobre lacunas); primeira e última semana podem ser parciais |
+
+Testes: 22 testes de dados (not_null, accepted_values, `dbt_utils.unique_combination_of_columns` e um singular de preço médio entre R$ 2 e 12), incluindo testes **na source** (unicidade da chave natural e unidade). Resultado: `PASS=25 ERROR=0` (3 modelos + 22 testes).
+
+| Prós | Contras |
+|---|---|
+| Testes, documentação e linhagem declarativos | Duas ferramentas para orquestrar (pipeline e dbt) |
+| Testes na source verificam a silver de fora do pipeline | Modelos `table` recriados por inteiro a cada execução (sem incremental) |
+| Separação clara: engenharia (Lakeflow) e modelagem analítica (dbt) | Piso de 30 coletas no ranking é uma escolha não calibrada |
+| Dá a segunda linha de defesa de qualidade (decisão 14) | Depende de token pessoal e de SQL Warehouse |
+
+### 14. Mudança de unidade do GNV em 01/07/2025
+
+**O que aconteceu:** o primeiro `dbt build` teve 2 testes de unicidade falhando (1 grupo em `variacao_semanal` e 72 em `ranking_municipios`). Investigação: a ANP trocou a unidade do GNV de `R$ / m³` (bytes `C2 B3`) para `R$ / m3` (byte `33`) em 01/07/2025, exatamente na fronteira entre os arquivos 2025-S1 e 2025-S2. Como `unidade_medida` estava no `GROUP BY` dos modelos, o mesmo GNV aparecia em duas linhas. Em 46.940 linhas a unidade antiga e em 8.732 a nova.
+
+**Por que a silver não pegou:** a única expectation sobre a unidade (`unidade_preenchida`) testava só nulo, e a afirmação "uma unidade por produto" foi verificada apenas na carga inicial, não após os incrementais. Quem detectou foi o teste do gold, que funcionou como segunda linha de defesa.
+
+**Correção:**
+- `regexp_replace` na silver (`m3` → `m³`); a bronze mantém o valor original da fonte;
+- expectation `unidade_conhecida` (só registra, pois uma unidade nova é sinal para investigar, não motivo para perder linhas);
+- `accepted_values` na source do dbt;
+- full refresh seletivo só da silver (bronze "Omitted").
+
+**Resultado:** GNV com uma única unidade e 55.672 linhas (46.940 + 8.732); total da silver inalterado em 2.607.139; série mensal do GNV com 36 meses, todos em `R$ / m³`; a semana de 30/06/2025 passou a ter uma linha (347 coletas, variação de −0,17%). A `unidade_conhecida` reprovou 9.114 linhas, número idêntico ao das linhas vazias; a leitura provável é que linhas vazias têm unidade nula e `NULL IN (...)` não é verdadeiro (inferido pela coincidência dos números, não consultado linha a linha).
+
+| Prós | Contras |
+|---|---|
+| Correção na camada responsável pela padronização | Exigiu reprocessar a silver |
+| Bronze preserva o dado cru | A lista de unidades aceitas é fixa; uma unidade legítima nova falha o build até ser incluída |
+| Falha futura fica explícita (expectation + teste na source) | |
 
 ## Reconciliação de linhas
 
@@ -246,7 +288,7 @@ A UI atual cria o pipeline direto (com `workspace.default` e nome automático) e
 | Removidas por dedup | −14 |
 | **Silver** | **2.607.139** |
 
-A silver medida (2.607.139) coincide com o cálculo. O incremento do 2025-S2 foi de 384.208 linhas na bronze e na silver, sem descartes.
+A silver medida (2.607.139) coincide com o cálculo. Por unidade: GNV com 55.672 linhas em `R$ / m³` e os demais produtos em `R$ / litro`. O incremento do 2025-S2 foi de 384.208 linhas na bronze e na silver, sem descartes.
 
 Silver por produto (só a carga inicial 2023-2024): DIESEL 208.717; DIESEL S10 334.729; ETANOL 395.155; GASOLINA 465.099; GASOLINA ADITIVADA 361.390; GNV 37.432. Datas de 2023-01-02 a 2024-12-31.
 
@@ -268,6 +310,7 @@ Silver por produto (só a carga inicial 2023-2024): DIESEL 208.717; DIESEL S10 3
    ```
 3. Criar um ETL pipeline (Jobs & Pipelines), adicionar `src/pipeline/bronze.py` e `src/pipeline/silver.py`, e executar com **Run pipeline**.
 4. Validar com as queries da seção de reconciliação.
+5. Gold: definir `DATABRICKS_TOKEN`, criar `dbt_combustiveis/profiles.yml` a partir do `profiles.yml.example`, e rodar `dbt deps` e `dbt build --profiles-dir .` dentro de `dbt_combustiveis/` (instalar `requirements.txt`, que inclui `pip-system-certs` se a rede inspecionar HTTPS).
 
 ## Limitações da Free Edition e riscos
 
@@ -278,6 +321,7 @@ Silver por produto (só a carga inicial 2023-2024): DIESEL 208.717; DIESEL S10 3
 | Dependência da API `pyspark.pipelines` (antes `dlt`) | Versão e sintaxe a fixar neste README ao final |
 | SQL Warehouse "dormindo" | Primeira query demora; aquecer antes do `dbt build` |
 | Token vazando | `.gitignore` e variável de ambiente `DATABRICKS_TOKEN` |
+| Time travel por `VERSION AS OF` falhou na streaming table da bronze (`assertion failed: The reconciliation query was not resolved...`); causa não confirmada | Demonstrar time travel nas tabelas gold (Delta comuns) |
 
 ## Roadmap
 
@@ -286,7 +330,7 @@ Silver por produto (só a carga inicial 2023-2024): DIESEL 208.717; DIESEL S10 3
 - [x] **Fase 2:** bronze com Auto Loader (contagens validadas)
 - [x] **Fase 3:** silver com expectations (grafo e relatório obtidos)
 - [x] **Fase 4:** ingestão incremental (2025-S1 e 2025-S2 sem full refresh na bronze; provada por `_source_file`, grafo e `DESCRIBE HISTORY`: versões 4 e 5 são `STREAMING UPDATE` em modo `Append`)
-- [ ] **Fase 5:** gold com dbt (`preco_medio_estado_mes`, `ranking_municipios`, `variacao_semanal`; testes e docs)
+- [x] **Fase 5:** gold com dbt (3 modelos, 22 testes, `PASS=25 ERROR=0`); falta o print do `dbt docs`
 - [ ] **Fase 6:** Job (pipeline → dbt) e Asset Bundle
 - [ ] **Fase 7:** dashboard AI/BI e documentação final
 
@@ -296,7 +340,7 @@ Silver por produto (só a carga inicial 2023-2024): DIESEL 208.717; DIESEL S10 3
 - [x] Relatório de expectations (query + resultado)
 - [x] Grafo com a carga incremental (bronze com ~430K de saída, não o reprocessamento total); salvar o print em `docs/`
 - [ ] `databricks.yml` e `resources/`
-- [ ] Projeto dbt com testes e docs
+- [x] Projeto dbt com testes passando (25/25); falta o print do grafo do `dbt docs`
 - [ ] Print do job com as duas tasks e do dashboard
 - [ ] Documento de Delta (`DESCRIBE HISTORY`, time travel, `OPTIMIZE`, `VACUUM`, `RESTORE`, liquid clustering)
 
@@ -322,3 +366,31 @@ WHERE d.dataset = 'silver_tipada'   -- ignora o histórico anterior à refatora�
 GROUP BY d.name
 ORDER BY reprovados DESC;
 ```
+
+### Versão por update (recomendada)
+
+A query acima soma todos os updates do event log, então updates reprocessados contam em dobro (o mesmo conjunto de 9.114 linhas vazias apareceu como 18.228). Use esta, que separa por update:
+
+```sql
+SELECT origin.update_id,
+       MAX(timestamp) AS ultimo_evento,
+       d.name AS expectation,
+       SUM(d.passed_records) AS aprovados,
+       SUM(d.failed_records) AS reprovados
+FROM (
+  SELECT origin, timestamp, explode(
+    from_json(
+      details:flow_progress.data_quality.expectations,
+      'array<struct<name:string,dataset:string,passed_records:int,failed_records:int>>'
+    )
+  ) AS d
+  FROM event_log(TABLE(gas_medallion.silver.silver_combustiveis))
+  WHERE event_type = 'flow_progress'
+    AND details:flow_progress.data_quality.expectations IS NOT NULL
+)
+WHERE d.dataset = 'silver_tipada'
+GROUP BY origin.update_id, d.name
+ORDER BY ultimo_evento DESC, d.name;
+```
+
+No update do último full refresh (cobre as 6 cargas): 2.607.153 aprovadas e 9.114 reprovadas por expectation.

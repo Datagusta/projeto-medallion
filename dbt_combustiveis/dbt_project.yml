@@ -1,0 +1,15 @@
+name: combustiveis
+version: "1.0.0"
+profile: combustiveis
+
+model-paths: ["models"]
+test-paths: ["tests"]
+
+vars:
+  # Mínimo de coletas para um município entrar no ranking (evita médias baseadas em poucas observações)
+  min_coletas_ranking: 30
+
+models:
+  combustiveis:
+    gold:
+      +materialized: table

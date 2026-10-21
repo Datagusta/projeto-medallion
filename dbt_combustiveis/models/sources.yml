@@ -1,0 +1,35 @@
+version: 2
+
+sources:
+  - name: silver
+    database: gas_medallion
+    schema: silver
+    description: "Camada silver produzida pelo Lakeflow Pipeline (fora do dbt)."
+    tables:
+      - name: silver_combustiveis
+        description: "Preços ANP tipados, validados por expectations e deduplicados."
+        data_tests:
+          # Confirma que a dedup do pipeline funcionou: a chave natural é única
+          - dbt_utils.unique_combination_of_columns:
+              arguments:
+                combination_of_columns: [cnpj_revenda, produto, data_coleta]
+        columns:
+          - name: cnpj_revenda
+            data_tests: [not_null]
+          - name: produto
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ['GASOLINA', 'GASOLINA ADITIVADA', 'ETANOL', 'DIESEL', 'DIESEL S10', 'GNV']
+          - name: unidade_medida
+            description: "Padronizada na silver. A ANP trocou 'R$ / m³' por 'R$ / m3' no GNV em 01/07/2025."
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ['R$ / litro', 'R$ / m³']
+          - name: data_coleta
+            data_tests: [not_null]
+          - name: valor_venda
+            data_tests: [not_null]

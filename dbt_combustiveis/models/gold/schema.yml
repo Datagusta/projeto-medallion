@@ -1,0 +1,54 @@
+version: 2
+
+models:
+  - name: preco_medio_estado_mes
+    description: "Preço médio, mínimo e máximo por estado, produto e mês. GNV em R$ / m³, demais em R$ / litro."
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [estado_sigla, produto, mes]
+    columns:
+      - name: estado_sigla
+        data_tests: [not_null]
+      - name: produto
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['GASOLINA', 'GASOLINA ADITIVADA', 'ETANOL', 'DIESEL', 'DIESEL S10', 'GNV']
+      - name: familia_produto
+        description: "Agrupa GASOLINA + ADITIVADA e DIESEL + S10. GNV e ETANOL ficam como família própria."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['GASOLINA', 'ETANOL', 'DIESEL', 'GNV']
+      - name: mes
+        data_tests: [not_null]
+      - name: preco_medio
+        data_tests: [not_null]
+
+  - name: ranking_municipios
+    description: "Ranking de municípios por preço médio, por produto, no período todo. Exige um mínimo de coletas (var min_coletas_ranking)."
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [estado_sigla, municipio, produto]
+    columns:
+      - name: rank_mais_caro
+        description: "1 = município com o maior preço médio do produto."
+        data_tests: [not_null]
+      - name: rank_mais_barato
+        description: "1 = município com o menor preço médio do produto."
+        data_tests: [not_null]
+
+  - name: variacao_semanal
+    description: "Preço médio semanal por produto e variação percentual sobre a semana imediatamente anterior (nula se houver lacuna)."
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [produto, semana]
+    columns:
+      - name: semana
+        data_tests: [not_null]
+      - name: preco_medio
+        data_tests: [not_null]

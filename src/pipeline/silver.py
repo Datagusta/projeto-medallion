@@ -8,6 +8,7 @@ from pyspark.sql import functions as F
 @dp.expect_or_drop("preco_valido", "valor_venda > 0 AND valor_venda < 20")
 @dp.expect_or_drop("data_valida", "data_coleta IS NOT NULL")
 @dp.expect_or_drop("cnpj_valido", "LENGTH(cnpj_revenda) = 14")
+@dp.expect("unidade_conhecida", "unidade_medida IN ('R$ / litro', 'R$ / m³')")
 def silver_tipada():
     b = spark.readStream.table("gas_medallion.bronze.bronze_combustiveis")
     return b.select(
@@ -24,7 +25,10 @@ def silver_tipada():
             F.upper(F.trim("produto")).alias("produto"),
             F.to_date(F.trim("data_da_coleta"), "dd/MM/yyyy").alias("data_coleta"),
             F.regexp_replace(F.trim("valor_de_venda"), ",", ".").cast("decimal(10,3)").alias("valor_venda"),
-            F.regexp_replace(F.trim("unidade_de_medida"), r"\s+", " ").alias("unidade_medida"),
+            F.regexp_replace(
+                F.regexp_replace(F.trim("unidade_de_medida"), r"\s+", " "),
+                "(?i)m3$", "m³",
+            ).alias("unidade_medida"),
             F.upper(F.trim("bandeira")).alias("bandeira"),
             "_source_file",
             "_ingested_at",

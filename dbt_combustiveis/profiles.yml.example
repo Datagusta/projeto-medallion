@@ -1,0 +1,11 @@
+combustiveis:
+  target: dev
+  outputs:
+    dev:
+      type: databricks
+      host: dbc-461dd8b5-69ca.cloud.databricks.com
+      http_path: /sql/1.0/warehouses/3ba09187541320bd
+      token: "{{ env_var('DATABRICKS_TOKEN') }}"
+      catalog: gas_medallion
+      schema: gold
+      threads: 4
