@@ -1,0 +1,13 @@
+resources:
+  pipelines:
+    anp_medallion_pipeline:
+      name: anp_medallion
+      catalog: ${var.catalog}
+      schema: bronze
+      serverless: true
+      continuous: false
+      libraries:
+        - file:
+            path: ../src/pipeline/bronze.py
+        - file:
+            path: ../src/pipeline/silver.py

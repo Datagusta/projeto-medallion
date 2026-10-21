@@ -1,0 +1,41 @@
+resources:
+  jobs:
+    anp_medallion_job:
+      name: anp_medallion_job
+      # Semanal, segunda-feira 06:00. Mantido PAUSED de propósito: o projeto roda sob demanda para não consumir a cota da Free Edition.
+      schedule:
+        quartz_cron_expression: "0 0 6 ? * MON"
+        timezone_id: America/Sao_Paulo
+        pause_status: PAUSED
+
+      # A task do dbt busca o projeto neste repositório (branch main).
+      git_source:
+        git_url: ${var.git_url}
+        git_provider: gitHub
+        git_branch: main
+
+      environments:
+        - environment_key: dbt_env
+          spec:
+            client: "2"
+            dependencies:
+              - dbt-databricks>=1.8,<2.0
+
+      tasks:
+        - task_key: pipeline_task
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.anp_medallion_pipeline.id}
+
+        - task_key: dbt_task
+          depends_on:
+            - task_key: pipeline_task
+          environment_key: dbt_env
+          dbt_task:
+            project_directory: dbt_combustiveis
+            commands:
+              - dbt deps
+              - dbt build
+            warehouse_id: ${var.warehouse_id}
+            catalog: ${var.catalog}
+            schema: gold
+            source: GIT
