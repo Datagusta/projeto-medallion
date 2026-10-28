@@ -155,17 +155,6 @@ O registro completo, com prós e contras de cada decisão, está em [docs/deciso
 - O job busca o projeto dbt na branch main do GitHub. Código sem push não roda.
 - Em redes que inspecionam HTTPS pode ser preciso instalar `pip-system-certs` para o dbt local.
 
-## Como reproduzir
-
-1. Criar o catálogo `gas_medallion` com os schemas `landing`, `bronze`, `silver` e `gold` e o volume `landing.raw`.
-2. Baixar os CSVs semestrais de combustíveis automotivos da ANP e renomear para `anp_automotivos_AAAA_sNN.csv`.
-3. Instalar o Databricks CLI, autenticar e enviar os arquivos para `/Volumes/gas_medallion/landing/raw/anp/`.
-4. Ajustar `git_url` e `warehouse_id` em `databricks.yml`.
-5. Rodar `databricks bundle validate`, depois `databricks bundle deploy -t dev` e `databricks bundle run anp_medallion_job -t dev`.
-6. Para rodar o dbt localmente, criar um ambiente virtual, instalar `requirements.txt`, definir `DATABRICKS_TOKEN`, copiar `profiles.yml.example` para `profiles.yml` e rodar `dbt deps` e `dbt build` dentro de `dbt_combustiveis`.
-
-Se o pipeline já existir fora do bundle, ele precisa ser excluído antes do deploy, porque uma tabela de pipeline só pode ter um dono.
-
 ## Estrutura do repositório
 
 ```
